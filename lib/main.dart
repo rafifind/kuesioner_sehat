@@ -2,6 +2,7 @@
 // MARK: - SYSTEM IMPORTS
 // ========================================================================== //
 
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -279,14 +280,37 @@ const List<QuestionCategory> staticCategories = [
 // MARK: - PERSISTENCE SERVICES
 // ==========================================
 
+/// Represents a completed assessment record stored in history.
+class AssessmentRecord {
+  final int totalScore;
+  final double percentage;
+  final String date;
+
+  const AssessmentRecord({
+    required this.totalScore,
+    required this.percentage,
+    required this.date,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'totalScore': totalScore,
+        'percentage': percentage,
+        'date': date,
+      };
+
+  factory AssessmentRecord.fromJson(Map<String, dynamic> json) => AssessmentRecord(
+        totalScore: json['totalScore'] as int? ?? 0,
+        percentage: (json['percentage'] as num? ?? 0.0).toDouble(),
+        date: json['date'] as String? ?? '',
+      );
+}
+
 /// Local storage service coordinating state persistence using [SharedPreferences].
 ///
 /// Implements client-side history storage to satisfy the Zero-Cost Infrastructure
 /// requirements, ensuring user data is entirely kept offline on the client device.
 class PreferencesService {
-  static const String _keyLastTotalScore = 'last_total_score';
-  static const String _keyLastPercentage = 'last_percentage';
-  static const String _keyLastDate = 'last_date';
+  static const String _keyHistory = 'assessment_history';
 
   /// Saves the results of the completed questionnaire locally.
   static Future<void> saveAssessment({
@@ -295,30 +319,68 @@ class PreferencesService {
     required String date,
   }) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_keyLastTotalScore, totalScore);
-    await prefs.setDouble(_keyLastPercentage, percentage);
-    await prefs.setString(_keyLastDate, date);
+    final history = await getAssessmentHistory();
+    
+    final newRecord = AssessmentRecord(
+      totalScore: totalScore,
+      percentage: percentage,
+      date: date,
+    );
+    
+    history.add(newRecord);
+    
+    final stringList = history.map((record) => jsonEncode(record.toJson())).toList();
+    await prefs.setStringList(_keyHistory, stringList);
   }
 
-  /// Retrieves the last recorded assessment score data.
-  ///
-  /// Returns null if no assessment history exists.
-  static Future<Map<String, dynamic>?> getLastAssessment() async {
+  /// Retrieves all recorded assessment scores, with backwards compatibility
+  /// migration for previous single-record formats.
+  static Future<List<AssessmentRecord>> getAssessmentHistory() async {
     final prefs = await SharedPreferences.getInstance();
-    if (!prefs.containsKey(_keyLastTotalScore)) return null;
-    return {
-      'totalScore': prefs.getInt(_keyLastTotalScore) ?? 0,
-      'percentage': prefs.getDouble(_keyLastPercentage) ?? 0.0,
-      'date': prefs.getString(_keyLastDate) ?? '',
-    };
+    final list = prefs.getStringList(_keyHistory);
+    if (list != null) {
+      try {
+        return list.map((item) {
+          final decoded = jsonDecode(item) as Map<String, dynamic>;
+          return AssessmentRecord.fromJson(decoded);
+        }).toList();
+      } catch (_) {
+        // ignore error decoding
+      }
+    }
+    
+    // Check if old format exists, migrate it
+    const String oldKeyScore = 'last_total_score';
+    if (prefs.containsKey(oldKeyScore)) {
+      final oldScore = prefs.getInt(oldKeyScore) ?? 0;
+      final oldPct = prefs.getDouble('last_percentage') ?? 0.0;
+      final oldDate = prefs.getString('last_date') ?? '';
+      
+      final migratedRecord = AssessmentRecord(
+        totalScore: oldScore,
+        percentage: oldPct,
+        date: oldDate,
+      );
+      
+      // Clean up old keys
+      await prefs.remove(oldKeyScore);
+      await prefs.remove('last_percentage');
+      await prefs.remove('last_date');
+      
+      // Save in new format
+      final stringList = [jsonEncode(migratedRecord.toJson())];
+      await prefs.setStringList(_keyHistory, stringList);
+      
+      return [migratedRecord];
+    }
+    
+    return [];
   }
 
   /// Wipes all cached assessment history from the local storage cache.
   static Future<void> clearHistory() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_keyLastTotalScore);
-    await prefs.remove(_keyLastPercentage);
-    await prefs.remove(_keyLastDate);
+    await prefs.remove(_keyHistory);
   }
 }
 
@@ -358,7 +420,7 @@ class _HomeScreenState extends State<HomeScreen> {
   int _currentCategoryIndex = 0;
   final PageController _pageController = PageController();
   final Map<int, int> _selectedAnswers = {}; // questionId -> score (0-3)
-  Map<String, dynamic>? _lastAssessment;
+  List<AssessmentRecord> _assessmentHistory = [];
   bool _isLoadingHistory = true;
 
   @override
@@ -378,11 +440,83 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _isLoadingHistory = true;
     });
-    final history = await PreferencesService.getLastAssessment();
+    final history = await PreferencesService.getAssessmentHistory();
     setState(() {
-      _lastAssessment = history;
+      _assessmentHistory = history;
       _isLoadingHistory = false;
     });
+  }
+
+  /// Displays the formal book attribution reference details in a custom dialog.
+  void _showReferencesDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Icon(Icons.menu_book_rounded, color: Colors.teal.shade700),
+            const SizedBox(width: 10),
+            const Text(
+              'Referensi Instrumen',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Asesmen ini diadaptasi dari buku referensi resmi:',
+              style: TextStyle(fontSize: 13, color: Colors.black87),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.teal.shade50,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.teal.shade100),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'PROGRAM H.I.D.U.P S.E.H.A.T',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                      color: Colors.teal.shade900,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Persembahan Rumah Sakit Advent Bandung bagi Indonesia Tercinta',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic,
+                      color: Colors.teal.shade800,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Semua hak cipta instrumen penilaian dan materi kuesioner dimiliki oleh penulis buku dan Rumah Sakit Advent Bandung.',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Tutup'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// Builds a formatted string representing the current system date in Indonesian.
@@ -491,7 +625,7 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (context) => AlertDialog(
         title: const Text('Hapus Riwayat'),
         content: const Text(
-          'Apakah Anda yakin ingin menghapus riwayat asesmen terakhir Anda?',
+          'Apakah Anda yakin ingin menghapus seluruh riwayat asesmen Anda?',
         ),
         actions: [
           TextButton(
@@ -511,7 +645,7 @@ class _HomeScreenState extends State<HomeScreen> {
       await _loadAssessmentHistory();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Riwayat berhasil dihapus.')),
+          const SnackBar(content: Text('Seluruh riwayat berhasil dihapus.')),
         );
       }
     }
@@ -672,30 +806,46 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Builds the greeting screen view, showing instructions and score history.
   Widget _buildWelcomeScreen() {
-    return Column(
-      children: [
-        Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                const SizedBox(height: 16),
-                _buildWelcomeHeader(),
-                const SizedBox(height: 24),
-                const _LetterAcronymWidget(),
-                const SizedBox(height: 32),
-                _isLoadingHistory
-                    ? const Center(child: CircularProgressIndicator())
-                    : _buildHistoryCard(),
-                const SizedBox(height: 24),
-                _buildGuideCard(),
-              ],
+    return Scaffold(
+      appBar: AppBar(
+        elevation: 0,
+        backgroundColor: Colors.transparent,
+        automaticallyImplyLeading: false,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.info_outline_rounded, color: Colors.teal.shade700),
+            tooltip: 'Referensi Buku',
+            onPressed: _showReferencesDialog,
+          ),
+        ],
+      ),
+      backgroundColor: Colors.transparent,
+      body: Column(
+        children: [
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  _buildWelcomeHeader(),
+                  const SizedBox(height: 24),
+                  const _LetterAcronymWidget(),
+                  const SizedBox(height: 32),
+                  _isLoadingHistory
+                      ? const Center(child: CircularProgressIndicator())
+                      : _buildHistoryCard(),
+                  const SizedBox(height: 24),
+                  _buildGuideCard(),
+                  const SizedBox(height: 24),
+                  _buildFootnote(),
+                ],
+              ),
             ),
           ),
-        ),
-        _buildStartButton(),
-      ],
+          _buildStartButton(),
+        ],
+      ),
     );
   }
 
@@ -742,7 +892,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Builds the assessment history summary container.
   Widget _buildHistoryCard() {
-    if (_lastAssessment == null) {
+    if (_assessmentHistory.isEmpty) {
       return Card(
         color: Colors.teal.shade50.withValues(alpha: 0.5),
         elevation: 0,
@@ -763,7 +913,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 4),
               Text(
-                'Data asesmen terakhir Anda akan tersimpan secara lokal setelah selesai mengisi seluruh kuesioner.',
+                'Data asesmen Anda akan tersimpan secara lokal setelah selesai mengisi seluruh kuesioner.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 12,
@@ -776,18 +926,12 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    final double pct = _lastAssessment!['percentage'];
-    final int score = _lastAssessment!['totalScore'];
-    final String date = _lastAssessment!['date'];
-    final color = _getColorForScorePercentage(pct);
-    final interp = _getInterpretationLabel(pct);
-
     return Card(
       margin: EdgeInsets.zero,
       elevation: 3,
       shadowColor: Colors.teal.withValues(alpha: 0.15),
       child: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -797,13 +941,13 @@ class _HomeScreenState extends State<HomeScreen> {
                 Row(
                   children: [
                     Icon(
-                      Icons.stars_rounded,
+                      Icons.history_rounded,
                       color: Colors.teal.shade700,
                       size: 24,
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      'Hasil Asesmen Terakhir',
+                      'Riwayat & Perkembangan',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
@@ -820,7 +964,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     color: Colors.red,
                   ),
                   label: const Text(
-                    'Hapus',
+                    'Hapus Semua',
                     style: TextStyle(fontSize: 12, color: Colors.red),
                   ),
                   style: TextButton.styleFrom(
@@ -830,105 +974,209 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ],
             ),
-            const Divider(height: 24),
-            Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Total Skor',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey.shade500,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '$score / 150',
-                        style: const TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black87,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Container(
-                  width: 1.5,
-                  height: 40,
-                  color: Colors.grey.shade200,
-                ),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 20),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+            const Divider(height: 16),
+            Column(
+              children: List.generate(_assessmentHistory.length, (idx) {
+                final record = _assessmentHistory[_assessmentHistory.length - 1 - idx];
+                final double pct = record.percentage;
+                final int score = record.totalScore;
+                final String date = record.date;
+                final color = _getColorForScorePercentage(pct);
+                final interp = _getInterpretationLabel(pct);
+                
+                Widget? trendWidget;
+                if (idx < _assessmentHistory.length - 1) {
+                  final prevRecord = _assessmentHistory[_assessmentHistory.length - 2 - idx];
+                  final diff = record.totalScore - prevRecord.totalScore;
+                  if (diff > 0) {
+                    trendWidget = Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
+                        const Icon(Icons.trending_up_rounded, color: Colors.green, size: 14),
+                        const SizedBox(width: 2),
                         Text(
-                          'Persentase & Kategori',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey.shade500,
+                          '+$diff',
+                          style: const TextStyle(
+                            color: Colors.green,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 11,
                           ),
                         ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            Text(
-                              '${pct.toStringAsFixed(1)}%',
-                              style: TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold,
-                                color: color,
-                              ),
+                      ],
+                    );
+                  } else if (diff < 0) {
+                    trendWidget = Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.trending_down_rounded, color: Colors.red, size: 14),
+                        const SizedBox(width: 2),
+                        Text(
+                          '$diff',
+                          style: const TextStyle(
+                            color: Colors.red,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    );
+                  } else {
+                    trendWidget = Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.trending_flat_rounded, color: Colors.grey, size: 14),
+                        const SizedBox(width: 2),
+                        Text(
+                          '0',
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    );
+                  }
+                }
+
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: idx == 0 ? Colors.teal.shade200 : Colors.grey.shade200,
+                        width: idx == 0 ? 1.5 : 1.0,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: idx == 0 ? Colors.teal.shade700 : Colors.grey.shade300,
+                            shape: BoxShape.circle,
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(
+                            '${_assessmentHistory.length - idx}',
+                            style: TextStyle(
+                              color: idx == 0 ? Colors.white : Colors.grey.shade700,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 11,
                             ),
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 4,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Text(
+                                    date,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: idx == 0 ? FontWeight.bold : FontWeight.normal,
+                                      color: Colors.grey.shade800,
+                                    ),
+                                  ),
+                                  if (idx == 0) ...[
+                                    const SizedBox(width: 6),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                      decoration: BoxDecoration(
+                                        color: Colors.teal.shade700,
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: const Text(
+                                        'Terbaru',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 8,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
                               ),
-                              decoration: BoxDecoration(
-                                color: color,
-                                borderRadius: BorderRadius.circular(12),
+                              const SizedBox(height: 2),
+                              Row(
+                                children: [
+                                  Text(
+                                    'Skor: $score/150 (${pct.toStringAsFixed(1)}%)',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey.shade600,
+                                    ),
+                                  ),
+                                  if (trendWidget != null) ...[
+                                    const SizedBox(width: 8),
+                                    trendWidget,
+                                  ],
+                                ],
                               ),
-                              child: Text(
-                                interp,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 11,
-                                ),
-                              ),
+                            ],
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: color,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            interp,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 10,
                             ),
-                          ],
+                          ),
                         ),
                       ],
                     ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Icon(
-                  Icons.calendar_month_outlined,
-                  size: 16,
-                  color: Colors.grey.shade500,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  'Tanggal pengisian: $date',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                ),
-              ],
+                );
+              }),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Builds a subtle footnote referencing the source book.
+  Widget _buildFootnote() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 16, bottom: 8),
+      child: Column(
+        children: [
+          Text(
+            'Berdasarkan instrumen "PROGRAM H.I.D.U.P S.E.H.A.T"',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.grey.shade500,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            'Rumah Sakit Advent Bandung',
+            style: TextStyle(
+              fontSize: 10,
+              color: Colors.grey.shade400,
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -93,3 +93,16 @@ Follow these instructions to clone, build, and run the project locally on your m
    ```bash
    flutter build web
    ```
+
+---
+
+## References & Credits
+
+The lifestyle assessment instrument and questionnaire questions utilized in this application are adapted from the official book:
+
+* **Title**: *PROGRAM H.I.D.U.P S.E.H.A.T*
+* **Subtitle**: *PERSEMBAHAN RUMAH SAKIT ADVENT BANDUNG BAGI INDONESIA TERCINTA*
+* **Institution**: Rumah Sakit Advent Bandung (Bandung Adventist Hospital)
+
+All credits and intellectual property for the assessment methodology, acronym structure, and question wording belong to the authors and Rumah Sakit Advent Bandung.
+
